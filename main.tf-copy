@@ -1,0 +1,131 @@
+provider "aws" {
+  access_key = "AKIA2TTSG7KF7QNJ4ZWM"
+  secret_key = "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"
+  region     = "us-west-2"
+}
+
+variable "root_name" {
+  default = "navetoocool.com"
+}
+
+variable "root_domain_name" {
+  default = "frontend.navetoocool.com"
+}
+
+resource "aws_s3_bucket" "s3_bucket" {
+  bucket = var.root_domain_name
+  acl    = "public-read"
+  policy = <<POLICY
+  {
+    "Version":"2012-10-17",
+    "Statement":[{
+        "Sid":"AddPerm",
+        "Effect":"Allow",
+        "Principal":"*",
+        "Action":["s3:GetObject"],
+        "Resource":["arn:aws:s3:::${var.root_name}/*"]
+    }]
+  }
+POLICY
+
+
+  website {
+    index_document = "index.html"
+    error_document = "index.html"
+  }
+}
+
+// Retrieve cert
+data "aws_acm_certificate" "ssl_cert" {
+  domain   = "*.${var.root_name}"
+  statuses = ["ISSUED"]
+}
+
+/**
+	Define CloudFront Distribution
+    - It will use the SSL certificate
+    - It will redirect all the http traffic to https.
+*/
+resource "aws_cloudfront_distribution" "frontend_cloudfront_distribution" {
+  origin {
+    custom_origin_config {
+      http_port              = "80"
+      https_port             = "443"
+      origin_protocol_policy = "http-only"
+      origin_ssl_protocols   = ["TLSv1", "TLSv1.1", "TLSv1.2"]
+    }
+    domain_name = aws_s3_bucket.s3_bucket.website_endpoint
+    origin_id   = var.root_domain_name
+  }
+
+  enabled             = true
+  default_root_object = "index.html"
+
+  default_cache_behavior {
+    viewer_protocol_policy = "redirect-to-https"
+    compress               = true
+    allowed_methods        = ["GET", "HEAD"]
+    cached_methods         = ["GET", "HEAD"]
+    target_origin_id       = var.root_name
+    min_ttl                = 0
+    default_ttl            = 86400
+    max_ttl                = 31536000
+
+    forwarded_values {
+      query_string = false
+      cookies {
+        forward = "none"
+      }
+    }
+  }
+
+  custom_error_response {
+    error_caching_min_ttl = 3000
+    error_code            = 404
+    response_code         = 200
+    response_page_path    = "/index.html"
+  }
+
+  # TF-UPGRADE-TODO: In Terraform v0.10 and earlier, it was sometimes necessary to
+  # force an interpolation expression to be interpreted as a list by wrapping it
+  # in an extra set of list brackets. That form was supported for compatibility in
+  # v0.11, but is no longer supported in Terraform v0.12.
+  #
+  # If the expression in the following list itself returns a list, remove the
+  # brackets to avoid interpretation as a list of lists. If the expression
+  # returns a single list item then leave it as-is and remove this TODO comment.
+  aliases = [var.root_domain_name]
+
+  restrictions {
+    geo_restriction {
+      restriction_type = "none"
+    }
+  }
+
+  viewer_certificate {
+    acm_certificate_arn = data.aws_acm_certificate.ssl_cert.arn
+    ssl_support_method  = "sni-only"
+  }
+}
+
+/**
+   ==============================================
+                     Option 1
+      Route53 is already managing your DNS
+   ==============================================
+*/
+data "aws_route53_zone" "zone" {
+  name         = "${var.root_domain_name}"
+  private_zone = false
+}
+
+resource "aws_route53_record" "frontend_record" {
+  zone_id = data.aws_route53_zone.zone.zone_id
+  name    = "${var.root_domain_name}"
+  type    = "A"
+  alias = {
+    name = aws_cloudfront_distribution.frontend_cloudfront_distribution.domain_name,
+    zone_id = aws_cloudfront_distribution.frontend_cloudfront_distribution.hosted_zone_id,
+    evaluate_target_health = false
+  }
+}
